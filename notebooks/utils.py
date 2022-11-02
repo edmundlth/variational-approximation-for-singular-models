@@ -32,8 +32,6 @@ class VariationalInference(object):
     
     def run_parameter_optimisation(self, num_epoch, num_snapshots=100, num_records=100, num_report=10, verbose=True):
         for t in range(num_epoch):
-            self.epoch += 1
-            
             self.optim.zero_grad()
             self.elbo = self.elbo_fn()
             neg_elbo = -self.elbo
@@ -54,6 +52,8 @@ class VariationalInference(object):
 
             if verbose and (t % (num_epoch // num_report)) == 0:
                 self.report_optim_step()
+            
+            self.epoch += 1
         return
 
     def elbo_fn(self):
@@ -67,7 +67,12 @@ class VariationalInference(object):
 
     def variational_density(self, w, parameters):
         pass
-        
+    
+    def log_evidence(self):
+        integrand = lambda y, x: self.true_unnormalised_density(torch.tensor([x, y])).numpy()
+        evidence = scipy.integrate.dblquad(integrand, 0, 1, 0, 1)
+        return np.log(evidence[0])
+
     def plot_variational_posterior(self, N=50, levels=50, lower_lim=0, upper_lim=1, animate=False, interval=200):
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
         xx, yy = torch.meshgrid(torch.linspace(lower_lim, upper_lim, N), torch.linspace(lower_lim, upper_lim, N))
@@ -79,7 +84,7 @@ class VariationalInference(object):
         ax.contour(xx, yy, z, levels=levels, colors='k', alpha=0.5)
         ax.set_xlabel("$\\xi_1$")
         ax.set_ylabel("$\\xi_2$")
-        ax.set_title("True distribution")
+        ax.set_title(f"True distribution\nlogZ={self.log_evidence():.3f}")
         
         ax = axes[1]
         z = self.variational_density(w, self.best_params)
@@ -131,3 +136,22 @@ class VariationalInference(object):
         ax.set_ylabel("ELBO")
         ax.set_xlabel("Epoch")
         return fig
+
+class LowerIncompleteGamma(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, lmbda, beta):
+        ctx.save_for_backward(lmbda, beta)
+        return torch.special.gammainc(lmbda, beta)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        lmbda, beta = ctx.saved_tensors
+        # reference: Eq 25 for derivative of upper incomplete gamma in 
+        # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
+        grad1 = 0
+        for k in range(10):
+            factorial = scipy.special.factorial(k)
+            term = (torch.log(beta) / (lmbda + k)) - 1. / (lmbda + k)**2
+            grad1 += (-beta)**k / factorial * term              
+        grad2 = beta ** (lmbda - 1) * torch.exp(-beta)
+        return grad_output * grad1, grad_output * grad2
