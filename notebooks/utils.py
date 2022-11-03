@@ -137,21 +137,82 @@ class VariationalInference(object):
         ax.set_xlabel("Epoch")
         return fig
 
-class LowerIncompleteGamma(torch.autograd.Function):
+class RegularisedLowerIncompleteGamma(torch.autograd.Function):
     @staticmethod
     def forward(ctx, lmbda, beta):
         ctx.save_for_backward(lmbda, beta)
-        return torch.special.gammainc(lmbda, beta)
+        return torch.igamma(lmbda, beta)
     
     @staticmethod
     def backward(ctx, grad_output):
         lmbda, beta = ctx.saved_tensors
-        # reference: Eq 25 for derivative of upper incomplete gamma in 
-        # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
-        grad1 = 0
-        for k in range(10):
-            factorial = scipy.special.factorial(k)
-            term = (torch.log(beta) / (lmbda + k)) - 1. / (lmbda + k)**2
-            grad1 += (-beta)**k / factorial * term              
-        grad2 = beta ** (lmbda - 1) * torch.exp(-beta)
-        return grad_output * grad1, grad_output * grad2
+        grad_lmbda = grad_lmbda_igamma(lmbda, beta)
+        grad_beta = grad_beta_igamma(lmbda, beta)
+        return grad_output * grad_lmbda, grad_output * grad_beta
+
+class GradLambdaRegularisedLowerIncompleteGamma(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, lmbda, beta):
+        ctx.save_for_backward(lmbda, beta)
+        return grad_lmbda_igamma(lmbda, beta)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        lmbda, beta = ctx.saved_tensors
+        digamma_lmbda = torch.digamma(lmbda)
+        loggamma_lmbda = torch.lgamma(lmbda)
+
+        term1 = -torch.polygamma(1, lmbda) * torch.igamma(lmbda, beta)
+        term2 = -digamma_lmbda * grad_lmbda_igamma(lmbda, beta)
+        term3 = torch.exp(torch.log(grad2_lmbda_lower_incomplete_gamma(lmbda, beta)) - loggamma_lmbda)
+        term4 = -torch.exp(torch.log(digamma_lmbda) - loggamma_lmbda + torch.log(grad_lmbda_lower_incomplete_gamma(lmbda, beta)))
+        grad_lmbda = term1 + term2 + term3 + term4 
+        grad_beta = (
+            -digamma_lmbda * grad_beta_igamma(lmbda, beta) 
+            + torch.exp(torch.log(grad2_lmbda_beta_lower_incomplete_gamma(lmbda, beta)) - loggamma_lmbda)
+        )
+        return grad_output * grad_lmbda, grad_output * grad_beta
+
+
+def grad_beta_igamma(lmbda, beta):
+    return torch.exp(-beta + (lmbda + 1) * torch.log(beta) - torch.lgamma(lmbda))
+
+def grad_lmbda_igamma(lmbda, beta): 
+
+    term = grad_lmbda_lower_incomplete_gamma(lmbda, beta)
+    grad_lmbda = -torch.digamma(lmbda) * torch.igamma(lmbda, beta) + torch.exp(- torch.lgamma(lmbda)) * term
+    return grad_lmbda
+
+
+def grad_lmbda_lower_incomplete_gamma(lmbda, beta):
+    # reference: Eq 25 for derivative of upper incomplete gamma in 
+    # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
+    acc = 0
+    for k in range(15):
+        term1 = torch.log(beta) - (1 / (lmbda - k))
+        term2 = (k + lmbda) * torch.log(beta) - torch.lgamma(torch.tensor([k + 1], dtype=torch.float)) - torch.log(lmbda + k) 
+        term2 = torch.exp(term2)
+        if k % 2 == 1:
+            term2 *= -1
+        acc += term1 * term2
+    return acc
+
+def grad2_lmbda_lower_incomplete_gamma(lmbda, beta):
+    # reference: Eq 25 for derivative of upper incomplete gamma in 
+    # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
+    acc = 0
+    logbeta = torch.log(beta)
+    for k in range(15):
+        x = lmbda + k
+        term1 = logbeta**2 / (2 * x) - logbeta / (x**2) + 1 / (x**3)
+
+        term2 = (k + lmbda) * torch.log(beta) - torch.lgamma(torch.tensor([k + 1], dtype=torch.float)) 
+        term2 = 2 * torch.exp(term2)
+        if k % 2 == 1:
+            term2 *= -1
+        acc += term1 * term2
+    return acc
+
+def grad2_lmbda_beta_lower_incomplete_gamma(lmbda, beta):
+    logbeta = torch.log(beta)
+    return torch.exp(-beta + lmbda * logbeta) * logbeta
