@@ -1,141 +1,7 @@
-from re import X
-from symbol import parameters
 import torch
-import torch.nn as nn
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 import scipy
 
-import matplotlib.animation as animation
-import torch.distributions as tdist
-
-
-
-
-class VariationalInference(object):
-    
-    def __init__(self, parameters, true_parameters, optim):
-        self.parameters = parameters
-        self.true_parameters = true_parameters
-        self.optim = optim
-        
-        self.snapshots = []
-        self.optim_rec = []
-        self.max_elbo = -torch.inf
-        self.best_epoch = None
-        self.best_params = None
-
-        self.elbo = None
-        self.epoch = 0
-        return 
-    
-    def run_parameter_optimisation(self, num_epoch, num_snapshots=100, num_records=100, num_report=10, verbose=True):
-        for t in range(num_epoch):
-            self.optim.zero_grad()
-            self.elbo = self.elbo_fn()
-            neg_elbo = -self.elbo
-            neg_elbo.backward()
-            self.optim.step()
-
-            if self.elbo > self.max_elbo: 
-                self.best_epoch = self.epoch
-                self.max_elbo = self.elbo
-                self.best_params = [param.clone().detach() for param in self.parameters]
-                
-            if t % (num_epoch // num_snapshots) == 0:
-                snapshot = [self.epoch, [param.clone().detach() for param in self.parameters], self.elbo]
-                self.snapshots.append(snapshot)
-
-            if t % (num_epoch // num_records) == 0:
-                self.optim_rec.append((self.epoch, self.elbo.detach()))
-
-            if verbose and (t % (num_epoch // num_report)) == 0:
-                self.report_optim_step()
-            
-            self.epoch += 1
-        return
-
-    def elbo_fn(self):
-        pass
-    
-    def report_optim_step(self):
-        pass
-
-    def true_unnormalised_density(self, w):
-        pass
-
-    def variational_density(self, w, parameters):
-        pass
-    
-    def log_evidence(self):
-        integrand = lambda y, x: self.true_unnormalised_density(torch.tensor([x, y])).numpy()
-        evidence = scipy.integrate.dblquad(integrand, 0, 1, 0, 1)
-        return np.log(evidence[0])
-
-    def plot_variational_posterior(self, N=50, levels=50, lower_lim=0, upper_lim=1, animate=False, interval=200):
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        xx, yy = torch.meshgrid(torch.linspace(lower_lim, upper_lim, N), torch.linspace(lower_lim, upper_lim, N))
-        w = torch.stack((xx, yy), dim=-1)
-
-        ax = axes[0]
-        z = self.true_unnormalised_density(w)
-        ax.contourf(xx, yy, z, levels=levels)
-        ax.contour(xx, yy, z, levels=levels, colors='k', alpha=0.5)
-        ax.set_xlabel("$\\xi_1$")
-        ax.set_ylabel("$\\xi_2$")
-        ax.set_title(f"True distribution\nlogZ={self.log_evidence():.3f}")
-        
-        ax = axes[1]
-        z = self.variational_density(w, self.best_params)
-        contourf = ax.contourf(xx, yy, z, levels=levels)
-        contour = ax.contour(xx, yy, z, levels=levels, colors='k', alpha=0.5)
-        ax.set_xlabel("$\\xi_1$")
-        ax.set_ylabel("$\\xi_2$")
-        ax.set_title(f"Best variational approximation\nEpoch: {self.best_epoch}, ELBO:{self.max_elbo:.3f}")
-
-        ax = axes[2]
-        epoch, parameters, elbo = self.snapshots[-1]
-        z = self.variational_density(w, parameters)
-        contourf = ax.contourf(xx, yy, z, levels=levels)
-        contour = ax.contour(xx, yy, z, levels=levels, colors='k', alpha=0.5)
-        ax.set_xlabel("$\\xi_1$")
-        ax.set_ylabel("$\\xi_2$")
-
-        if animate:
-            def animation_frame(frame_num):
-                nonlocal ax, w, contour, contourf
-                epoch, parameters, elbo = self.snapshots[frame_num]
-                z = self.variational_density(w, parameters)
-                
-                for col in contourf.collections:
-                    col.remove()
-                contourf = ax.contourf(xx, yy, z, levels=levels)
-                ax.set_title(
-                    f"epoch:{epoch}, elbo:{elbo:.2f}\n"
-                    f"{[list(np.around(param.clone().tolist(), 2)) for param in parameters]}"
-                )
-                
-                for col in contour.collections:
-                    col.remove()
-                contour = ax.contour(xx, yy, z, levels=levels, colors='k', alpha=0.5)
-                return contour, contourf
-
-            anim = animation.FuncAnimation(fig, animation_frame, frames=len(self.snapshots), interval=interval)
-            video = anim.to_html5_video()
-        else:
-            video = None
-        
-        return fig, video
-    
-    def plot_training_curve(self):
-        fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-        x = np.array(self.optim_rec)
-        ax.plot(x[:, 0], x[:, 1])
-        ax.set_title("Training Curve")
-        ax.set_ylabel("ELBO")
-        ax.set_xlabel("Epoch")
-        return fig
 
 class RegularisedLowerIncompleteGamma(torch.autograd.Function):
     @staticmethod
@@ -178,41 +44,126 @@ def grad_beta_igamma(lmbda, beta):
     return torch.exp(-beta + (lmbda + 1) * torch.log(beta) - torch.lgamma(lmbda))
 
 def grad_lmbda_igamma(lmbda, beta): 
+    result = -torch.digamma(lmbda) + grad_lmbda_lower_incomplete_gamma(lmbda, beta)
+    result *= torch.exp(-torch.lgamma(lmbda))
+    return result
 
-    term = grad_lmbda_lower_incomplete_gamma(lmbda, beta)
-    grad_lmbda = -torch.digamma(lmbda) * torch.igamma(lmbda, beta) + torch.exp(- torch.lgamma(lmbda)) * term
-    return grad_lmbda
+# def grad_lmbda_lower_incomplete_gamma(lmbda, beta):
+#     # reference: Eq 25 for derivative of upper incomplete gamma in 
+#     # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
+#     acc = 0
+#     for k in range(15):
+#         term1 = torch.log(beta) / (lmbda + k)
+#         term1 -= 1 / (lmbda + k)**2
+        
+#         term2 = torch.exp(
+#             (k + lmbda) * torch.log(beta) - torch.lgamma(torch.tensor([k + 1], dtype=torch.float))
+#         )
+#         if k % 2 == 1:
+#             term2 *= -1
+#         acc += term1 * term2
+#     return acc
 
+def _integrand(t, lmbda, beta, n):
+    return np.exp(-beta * t) * (beta * t)**(lmbda-1) * np.log(beta * t)**n
+
+def _integrated1(lmbda, beta):
+    return scipy.integrate.quad(_integrand, 0, 1, args=(lmbda, beta, 1))[0] * beta
+
+_vec_integrated = np.vectorize(_integrated1)
 
 def grad_lmbda_lower_incomplete_gamma(lmbda, beta):
-    # reference: Eq 25 for derivative of upper incomplete gamma in 
-    # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
-    acc = 0
-    for k in range(15):
-        term1 = torch.log(beta) - (1 / (lmbda - k))
-        term2 = (k + lmbda) * torch.log(beta) - torch.lgamma(torch.tensor([k + 1], dtype=torch.float)) - torch.log(lmbda + k) 
-        term2 = torch.exp(term2)
-        if k % 2 == 1:
-            term2 *= -1
-        acc += term1 * term2
-    return acc
+    return torch.tensor(_vec_integrated(lmbda, beta))
+
+
+# def grad2_lmbda_lower_incomplete_gamma(lmbda, beta):
+#     # reference: Eq 25 for derivative of upper incomplete gamma in 
+#     # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
+#     acc = 0
+#     logbeta = torch.log(beta)
+#     for k in range(15):
+#         x = lmbda + k
+#         term1 = logbeta**2 / (2 * x) - logbeta / (x**2) + 1 / (x**3)
+
+#         term2 = (k + lmbda) * torch.log(beta) - torch.lgamma(torch.tensor([k + 1], dtype=torch.float)) 
+#         term2 = 2 * torch.exp(term2)
+#         if k % 2 == 1:
+#             term2 *= -1
+#         acc += term1 * term2
+#     return acc
+
+def _integrated2(lmbda, beta):
+    return scipy.integrate.quad(_integrand, 0, 1, args=(lmbda, beta, 2))[0] * beta
+
+_vec_integrated2 = np.vectorize(_integrated2)
 
 def grad2_lmbda_lower_incomplete_gamma(lmbda, beta):
-    # reference: Eq 25 for derivative of upper incomplete gamma in 
-    # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
-    acc = 0
-    logbeta = torch.log(beta)
-    for k in range(15):
-        x = lmbda + k
-        term1 = logbeta**2 / (2 * x) - logbeta / (x**2) + 1 / (x**3)
+    return torch.tensor(_vec_integrated2(lmbda, beta))
 
-        term2 = (k + lmbda) * torch.log(beta) - torch.lgamma(torch.tensor([k + 1], dtype=torch.float)) 
-        term2 = 2 * torch.exp(term2)
-        if k % 2 == 1:
-            term2 *= -1
-        acc += term1 * term2
-    return acc
 
 def grad2_lmbda_beta_lower_incomplete_gamma(lmbda, beta):
     logbeta = torch.log(beta)
     return torch.exp(-beta + lmbda * logbeta) * logbeta
+
+
+
+
+def logZ_approx(k, h, n):
+    lambdas = (h + 1) / (2 * k)
+    rlct = np.min(lambdas)
+    m = np.sum(lambdas == rlct)
+    const_term = (
+        scipy.special.loggamma(rlct) 
+        - m * np.log(2)
+    )
+
+    if m == 2: 
+        const_term -= np.sum(np.log(k))
+    elif m == 1:
+        i = np.argmin(lambdas)
+        j = np.argmax(lambdas)
+        const_term -= np.log(k[i])
+        const_term -= np.log(lambdas[j] - lambdas[i])
+
+    leading_terms = -rlct * np.log(n) + (m -1) * np.log(np.log(n)) + const_term
+    return leading_terms
+
+igamma = RegularisedLowerIncompleteGamma.apply
+gradigamma = GradLambdaRegularisedLowerIncompleteGamma.apply # lambda x, y: torch.digamma(x) #
+def elbo_func_mf_gamma_trunc(lambdas, ks, betas, lambda_0, k_0, n):
+    r = k_0 / ks
+    iglambdas_betas = igamma(lambdas, betas)
+    logbetas = torch.log(betas)
+    term1 = n * torch.exp(torch.sum(
+        -r * logbetas
+        + torch.lgamma(lambdas + r) - torch.lgamma(lambdas)
+        + torch.log(igamma(lambdas + r, betas)) - torch.log(iglambdas_betas)
+    ))
+
+    term2 = torch.sum(
+        torch.log(2 * ks) + lambdas * logbetas 
+        - torch.lgamma(lambdas) - torch.log(iglambdas_betas)
+        - lambdas * (igamma(lambdas + r, betas) / iglambdas_betas)
+        + (lambdas - r * lambda_0) * (gradigamma(lambdas, betas) / iglambdas_betas - logbetas)
+    )
+    return -term1 - term2
+
+
+def elbo_func_mf_gamma(lambdas, ks, betas, lambda_0, k_0, n):
+    r = k_0 / ks
+    logbetas = torch.log(betas)    
+    term1 = n * torch.exp(torch.sum(
+        -r * logbetas 
+        +  torch.lgamma(lambdas + r) - torch.lgamma(lambdas)
+    ))
+    
+    term2 = torch.sum(
+        torch.log(2 * ks) + lambdas * logbetas 
+        - torch.lgamma(lambdas) - lambdas 
+        + (lambdas - r * lambda_0) * (torch.digamma(lambdas) - logbetas)
+    )
+    return -term1 - term2
+
+
+def standard_form_unnormlised_density(w, k, h, n):
+    return torch.abs(torch.prod(w**h, dim=-1)) * torch.exp(-n * torch.prod(w ** (2 * k), dim=-1))
