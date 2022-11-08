@@ -173,13 +173,23 @@ class VariationalInference(object):
 
 
 class GaussianFamilyOn2DGaussianPosterior(VariationalInference):
-    def __init__(self, mu_0, sigma_0, lr=0.001, base_samples=100):
+    def __init__(self, mu_0, sigma_0, lr=0.001, base_samples=100, init_mu=None, init_logsigma=None):
         self.mu_0 = mu_0
         self.sigma_0 = sigma_0
         self.true_parameters = [mu_0, sigma_0]
 
-        self.mu = nn.Parameter(torch.tensor([0.1, 0.9], dtype=torch.float))
-        self.logsigma = nn.Parameter(torch.tensor([np.log(0.9)], dtype=torch.float))
+        if init_mu is not None:
+            self.init_mu = init_mu
+        else:
+            self.init_mu = torch.rand_like(self.mu_0, dtype=torch.float)
+
+        if init_logsigma is not None:
+            self.init_logsigma = init_logsigma
+        else:
+            self.init_logsigma = torch.log(torch.rand_like(self.mu_0, dtype=torch.float) * 2)
+        self.mu = nn.Parameter(self.init_mu, requires_grad=True)
+        self.logsigma = nn.Parameter(self.init_logsigma, requires_grad=True)
+        
         self.parameters = [self.mu, self.logsigma]
 
         self.optim = torch.optim.Adam(self.parameters, lr=lr)
@@ -194,13 +204,13 @@ class GaussianFamilyOn2DGaussianPosterior(VariationalInference):
         )
         xi = q.rsample((self.base_samples,))
         term1 = q.log_prob(xi)
-        term2 = torch.sum((xi - self.mu_0) ** 2, dim=1) / (2 * self.sigma_0**2)
+        term2 = torch.sum((xi - self.mu_0) ** 2/ (2 * self.sigma_0**2), dim=1) 
         return -torch.mean(term1 + term2)
 
     def report_optim_step(self):
         print(
             f"Epoch {self.epoch:5d}: mu={np.around(self.mu.detach().tolist(), 2)}, "
-            f"sigma={torch.exp(self.logsigma).item():.3f}, elbo={self.elbo:.2f}"
+            f"sigma={torch.exp(self.logsigma).tolist()}, elbo={self.elbo:.2f}"
         )
 
     def true_unnormalised_density(self, w):
@@ -220,16 +230,23 @@ class GaussianFamilyOn2DGaussianPosterior(VariationalInference):
 
 
 class GaussianFamilyOn2DStandardForm(VariationalInference):
-    def __init__(self, n, k_0, h_0, lr=0.001, base_samples=100):
+    def __init__(self, n, k_0, h_0, lr=0.001, base_samples=100, init_mu=None, init_logsigma=None):
         self.n = n
         self.k_0 = k_0
         self.h_0 = h_0
         self.true_parameters = [k_0, h_0]
-        self.mu = nn.Parameter(torch.tensor([0.1, 0.9], dtype=torch.float))
-        self.logsigma = nn.Parameter(torch.tensor([np.log(0.3)], dtype=torch.float))
 
-        #         self.mu = nn.Parameter(torch.rand(2, dtype=torch.float)) # random initialisation?
-        #         self.logsigma = nn.Parameter(torch.log(1 + torch.rand(1, dtype=torch.float)))
+        if init_mu is not None:
+            self.init_mu = init_mu
+        else:
+            self.init_mu = torch.rand_like(self.k_0, dtype=torch.float)
+
+        if init_logsigma is not None:
+            self.init_logsigma = init_logsigma
+        else:
+            self.init_logsigma = torch.log(torch.rand_like(self.k_0, dtype=torch.float) * 2)
+        self.mu = nn.Parameter(self.init_mu, requires_grad=True)
+        self.logsigma = nn.Parameter(self.init_logsigma, requires_grad=True)
         self.parameters = [self.mu, self.logsigma]
 
         self.optim = torch.optim.Adam(self.parameters, lr=lr)
@@ -252,7 +269,7 @@ class GaussianFamilyOn2DStandardForm(VariationalInference):
     def report_optim_step(self):
         print(
             f"Epoch {self.epoch:6d}: mu={np.around(self.mu.detach().tolist(), 2)}, "
-            f"sigma={torch.exp(self.logsigma).item():.3f}, elbo={self.elbo:.2f}"
+            f"sigma={torch.exp(self.logsigma).tolist()}, elbo={self.elbo:.2f}"
         )
 
     def true_unnormalised_density(self, w):
@@ -336,6 +353,80 @@ class MeanFieldGammaOn2DStandardForm(VariationalInference):
         z = torch.prod(z / normalising_const, axis=-1)
         return z
 
+class MeanFieldGammaOn2DStandardForm(VariationalInference):
+    def __init__(
+        self,
+        n,
+        k_0,
+        lambda_0,
+        lr=0.001,
+        lambdas_grad=True,
+        ks_grad=True,
+        beta1_grad=False,
+        init_params=None
+    ):
+
+        self.n = n
+        self.k_0 = k_0
+        self.lambda_0 = lambda_0
+        # making sure that the first lambda_0 is the RLCT
+        # this makes it possible to freeze beta1=n is required.
+        assert torch.min(self.lambda_0) == self.lambda_0[0]
+        self.h_0 = 2 * k_0 * lambda_0 - 1
+        self.true_parameters = [self.lambda_0, self.k_0, self.n]
+        
+        if init_params is not None:
+            self.init_lambdas, self.init_ks, self.init_betas = init_params
+        else:
+            self.init_lambdas = self.lambda_0
+            self.init_ks = self.k_0
+            self.init_betas = torch.tensor([n, 1.0])
+
+        self.loglambdas = nn.Parameter(torch.log(self.init_lambdas), requires_grad=lambdas_grad)
+        self.logks = nn.Parameter(torch.log(self.init_ks), requires_grad=ks_grad)
+        self.logbeta1 = nn.Parameter(torch.log(self.init_betas[0:1]), requires_grad=beta1_grad)
+        self.logbetas_rest = nn.Parameter(torch.log(self.init_betas[1:]), requires_grad=True)
+        self.parameters = [
+            self.loglambdas,
+            self.logks,
+            self.logbeta1,
+            self.logbetas_rest,
+        ]
+
+        self.optim = torch.optim.Adam(self.parameters, lr=lr)
+        super(MeanFieldGammaOn2DStandardForm, self).__init__(
+            self.parameters, self.true_parameters, self.optim
+        )
+
+    def elbo_fn(self):
+        lambdas, ks, beta1, betas_rest = [torch.exp(param) for param in self.parameters]
+        betas = torch.concat([beta1, betas_rest])
+        return elbo_func_mf_gamma(lambdas, ks, betas, self.lambda_0, self.k_0, self.n)
+
+    def report_optim_step(self):
+        lambdas, ks, beta1, betas_rest = [torch.exp(param) for param in self.parameters]
+        betas = torch.concat([beta1, betas_rest])
+        print(
+            f"Epoch {self.epoch:5d}: elbo={self.elbo:.2f}, "
+            f"lambdas={list(np.around(lambdas.tolist(), 2))}, "
+            f"ks={list(np.around(ks.tolist(), 2))}, "
+            f"betas={list(np.around(betas.tolist(),2))}"
+        )
+
+    def true_unnormalised_density(self, w):
+        return standard_form_unnormlised_density(w, self.k_0, self.h_0, self.n)
+
+    def variational_density(self, w, parameters):
+        lambdas, ks, beta1, betas_rest = [torch.exp(param) for param in parameters]
+        betas = torch.concat([beta1, betas_rest])
+        z = w ** (2 * ks * lambdas - 1) * torch.exp(-betas * (w**ks))
+        normalising_const = scipy.special.gamma(lambdas) / (
+            2 * ks * (betas ** (lambdas))
+        )
+        z = torch.prod(z / normalising_const, axis=-1)
+        return z
+
+
 
 class MeanFieldTruncatedGammaOn2DStandardForm(MeanFieldGammaOn2DStandardForm):
     def __init__(
@@ -347,6 +438,7 @@ class MeanFieldTruncatedGammaOn2DStandardForm(MeanFieldGammaOn2DStandardForm):
         lambdas_grad=True,
         ks_grad=True,
         beta1_grad=False,
+        init_params=None
     ):
         super(MeanFieldTruncatedGammaOn2DStandardForm, self).__init__(
             n,
@@ -356,6 +448,7 @@ class MeanFieldTruncatedGammaOn2DStandardForm(MeanFieldGammaOn2DStandardForm):
             lambdas_grad=lambdas_grad,
             ks_grad=ks_grad,
             beta1_grad=beta1_grad,
+            init_params=init_params
         )
 
     def elbo_fn(self):
@@ -374,84 +467,3 @@ class MeanFieldTruncatedGammaOn2DStandardForm(MeanFieldGammaOn2DStandardForm):
         )
         z = torch.prod(z / normalising_const, axis=-1)
         return z
-
-
-# class MeanFieldGammaRestrictedOn2DStandardForm(VariationalInference):
-#     def __init__(self, n, k_0, lambda_0, lr=0.001):
-#         self.n = n
-#         self.k_0 = k_0
-#         self.lambda_0 = lambda_0
-#         self.h_0 = 2 * k_0 * lambda_0 - 1
-#         self.true_parameters = [lambda_0, k_0, n]
-
-#         self.lambdas = lambda_0
-#         self.ks = k_0
-#         self.beta1 = torch.tensor([self.n])
-#         self.logbetas = nn.Parameter(torch.log(torch.tensor([1.0])))
-#         self.parameters = [self.logbetas]
-
-#         self.optim = torch.optim.Adam(self.parameters, lr=lr)
-#         super(MeanFieldGammaRestrictedOn2DStandardForm, self).__init__(
-#             self.parameters, self.true_parameters, self.optim
-#         )
-
-#     def elbo_fn(self):
-#         lambdas = self.lambdas
-#         ks = self.ks
-#         betas = torch.stack([self.beta1, torch.exp(self.logbetas)], dim=0)
-#         return elbo_func_mf_gamma(lambdas, ks, betas, self.lambda_0, self.k_0, self.n)
-
-#     def report_optim_step(self):
-#         betas = torch.stack([self.beta1, torch.exp(self.logbetas)], dim=0)
-#         print(
-#             f"Epoch {self.epoch:5d}: elbo={self.elbo:.2f}, "
-#             f"betas  ={list(np.around(betas.tolist(),2))}"
-#         )
-
-#     def true_unnormalised_density(self, w):
-#         return standard_form_unnormlised_density(w, self.k_0, self.h_0, self.n)
-
-#     def variational_density(self, w, parameters):
-#         lambdas = self.lambdas
-#         ks = self.ks
-#         betas = torch.stack([self.beta1, torch.exp(parameters[0])], dim=0)
-
-#         betas = torch.exp(parameters[0])
-#         z = w ** (2 * ks * lambdas - 1) * torch.exp(-betas * (w**ks))
-#         normalising_const = scipy.special.gamma(lambdas) / (
-#             2 * ks * (betas ** (lambdas))
-#         )
-#         z = torch.prod(z / normalising_const, axis=-1)
-#         return z
-
-
-# class MeanFieldTruncatedGammaRestrictedOn2DStandardForm(
-#     MeanFieldGammaRestrictedOn2DStandardForm
-# ):
-#     def __init__(self, n, k_0, lambda_0, lr=0.001):
-#         super(MeanFieldTruncatedGammaRestrictedOn2DStandardForm, self).__init__(
-#             n, k_0, lambda_0, lr=lr
-#         )
-
-#     def elbo_fn(self):
-#         lambdas = self.lambdas
-#         ks = self.ks
-#         betas = torch.stack([self.beta1, torch.exp(self.logbetas)], dim=0)
-#         return elbo_func_mf_gamma_trunc(
-#             lambdas, ks, betas, self.lambda_0, self.k_0, self.n
-#         )
-
-#     def variational_density(self, w, parameters):
-#         lambdas = self.lambdas
-#         ks = self.ks
-#         betas = torch.stack([self.beta1, torch.exp(parameters[0])], dim=0)
-
-#         betas = torch.exp(parameters[0])
-#         z = w ** (2 * ks * lambdas - 1) * torch.exp(-betas * (w**ks))
-#         normalising_const = (
-#             scipy.special.gamma(lambdas)
-#             * torch.igamma(lambdas, betas)
-#             / (2 * ks * (betas ** (lambdas)))
-#         )
-#         z = torch.prod(z / normalising_const, axis=-1)
-#         return z

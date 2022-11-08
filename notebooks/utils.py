@@ -48,57 +48,71 @@ def grad_lmbda_igamma(lmbda, beta):
     result *= torch.exp(-torch.lgamma(lmbda))
     return result
 
-# def grad_lmbda_lower_incomplete_gamma(lmbda, beta):
-#     # reference: Eq 25 for derivative of upper incomplete gamma in 
-#     # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
-#     acc = 0
-#     for k in range(15):
-#         term1 = torch.log(beta) / (lmbda + k)
-#         term1 -= 1 / (lmbda + k)**2
-        
-#         term2 = torch.exp(
-#             (k + lmbda) * torch.log(beta) - torch.lgamma(torch.tensor([k + 1], dtype=torch.float))
-#         )
-#         if k % 2 == 1:
-#             term2 *= -1
-#         acc += term1 * term2
-#     return acc
-
-def _integrand(t, lmbda, beta, n):
-    return np.exp(-beta * t) * (beta * t)**(lmbda-1) * np.log(beta * t)**n
-
-def _integrated1(lmbda, beta):
-    return scipy.integrate.quad(_integrand, 0, 1, args=(lmbda, beta, 1))[0] * beta
-
-_vec_integrated = np.vectorize(_integrated1)
-
 def grad_lmbda_lower_incomplete_gamma(lmbda, beta):
-    return torch.tensor(_vec_integrated(lmbda, beta))
+    mask = beta < lmbda + 20
+    result = torch.zeros_like(lmbda)
+    result[~mask] = torch.digamma(lmbda[~mask]) * torch.exp(torch.lgamma(lmbda[~mask]))
+    if torch.all(mask):
+        return result
+    # reference: Eq 25 for derivative of upper incomplete gamma in 
+    # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
+    l = lmbda[mask]
+    b = beta[mask]
+    # acc = 0
+    for k in range(15):
+        term1 = torch.log(b) / (l + k)
+        term1 -= 1 / (l + k)**2
+        
+        term2 = torch.exp(
+            (k + l) * torch.log(b) - torch.lgamma(torch.tensor([k + 1], dtype=torch.float))
+        )
+        if k % 2 == 1:
+            term2 *= -1
+        result[mask] += term1 * term2
+    return result
 
+# def _integrand(t, lmbda, beta, n):
+#     return np.exp(-beta * t) * (beta * t)**(lmbda-1) * np.log(beta * t)**n
 
-# def grad2_lmbda_lower_incomplete_gamma(lmbda, beta):
-#     # reference: Eq 25 for derivative of upper incomplete gamma in 
-#     # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
-#     acc = 0
-#     logbeta = torch.log(beta)
-#     for k in range(15):
-#         x = lmbda + k
-#         term1 = logbeta**2 / (2 * x) - logbeta / (x**2) + 1 / (x**3)
+# def _integrated1(lmbda, beta):
+#     return scipy.integrate.quad(_integrand, 0, 1, args=(lmbda, beta, 1))[0] * beta
 
-#         term2 = (k + lmbda) * torch.log(beta) - torch.lgamma(torch.tensor([k + 1], dtype=torch.float)) 
-#         term2 = 2 * torch.exp(term2)
-#         if k % 2 == 1:
-#             term2 *= -1
-#         acc += term1 * term2
-#     return acc
+# _vec_integrated = np.vectorize(_integrated1)
 
-def _integrated2(lmbda, beta):
-    return scipy.integrate.quad(_integrand, 0, 1, args=(lmbda, beta, 2))[0] * beta
+# def grad_lmbda_lower_incomplete_gamma(lmbda, beta):
+#     return torch.tensor(_vec_integrated(lmbda, beta))
 
-_vec_integrated2 = np.vectorize(_integrated2)
 
 def grad2_lmbda_lower_incomplete_gamma(lmbda, beta):
-    return torch.tensor(_vec_integrated2(lmbda, beta))
+    mask = beta < lmbda + 20
+    result = torch.zeros_like(lmbda)
+    result[~mask] = (torch.polygamma(1, lmbda[~mask]) + torch.digamma(lmbda[~mask])) * torch.exp(torch.lgamma(lmbda[~mask]))
+    if torch.all(mask):
+        return result
+    
+    # reference: Eq 25 for derivative of upper incomplete gamma in 
+    # http://www.iaeng.org/IJAM/issues_v47/issue_3/IJAM_47_3_04.pdf
+    # acc = 0
+    logbeta = torch.log(beta[mask])
+    l = lmbda[mask]
+    for k in range(100):
+        x = l + k
+        term1 = logbeta**2 / (2 * x) - logbeta / (x**2) + 1 / (x**3)
+
+        term2 = (k + l) * logbeta - torch.lgamma(torch.tensor([k + 1], dtype=torch.float)) 
+        term2 = 2 * torch.exp(term2)
+        if k % 2 == 1:
+            term2 *= -1
+        result[mask] += term1 * term2
+    return result
+
+# def _integrated2(lmbda, beta):
+#     return scipy.integrate.quad(_integrand, 0, 1, args=(lmbda, beta, 2))[0] * beta
+
+# _vec_integrated2 = np.vectorize(_integrated2)
+
+# def grad2_lmbda_lower_incomplete_gamma(lmbda, beta):
+#     return torch.tensor(_vec_integrated2(lmbda, beta))
 
 
 def grad2_lmbda_beta_lower_incomplete_gamma(lmbda, beta):
@@ -130,7 +144,7 @@ def logZ_approx(k, h, n):
 
 igamma = RegularisedLowerIncompleteGamma.apply
 gradigamma = GradLambdaRegularisedLowerIncompleteGamma.apply # lambda x, y: torch.digamma(x) #
-def elbo_func_mf_gamma_trunc(lambdas, ks, betas, lambda_0, k_0, n):
+def elbo_func_mf_gamma_trunc(lambdas, ks, betas, lambda_0, k_0, n, ignore_term=True):
     r = k_0 / ks
     iglambdas_betas = igamma(lambdas, betas)
     logbetas = torch.log(betas)
@@ -144,8 +158,12 @@ def elbo_func_mf_gamma_trunc(lambdas, ks, betas, lambda_0, k_0, n):
         torch.log(2 * ks) + lambdas * logbetas 
         - torch.lgamma(lambdas) - torch.log(iglambdas_betas)
         - lambdas * (igamma(lambdas + r, betas) / iglambdas_betas)
-        + (lambdas - r * lambda_0) * (gradigamma(lambdas, betas) / iglambdas_betas - logbetas)
     )
+    # this term is the problematic term that involves derivatives of incomplete gamma function. 
+    # when lambdas and ks matches the true parameters, this should be zero, 
+    # but even there, it would generically has non-zero gradient. 
+    if not ignore_term:
+        term2 += (lambdas - r * lambda_0) * (gradigamma(lambdas, betas) / iglambdas_betas - logbetas)
     return -term1 - term2
 
 
