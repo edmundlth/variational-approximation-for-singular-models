@@ -25,28 +25,45 @@ class GradLambdaRegularisedLowerIncompleteGamma(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         lmbda, beta = ctx.saved_tensors
-        digamma_lmbda = torch.digamma(lmbda)
-        loggamma_lmbda = torch.lgamma(lmbda)
-
-        term1 = -torch.polygamma(1, lmbda) * torch.igamma(lmbda, beta)
-        term2 = -digamma_lmbda * grad_lmbda_igamma(lmbda, beta)
-        term3 = torch.exp(torch.log(grad2_lmbda_lower_incomplete_gamma(lmbda, beta)) - loggamma_lmbda)
-        term4 = -torch.exp(torch.log(digamma_lmbda) - loggamma_lmbda + torch.log(grad_lmbda_lower_incomplete_gamma(lmbda, beta)))
-        grad_lmbda = term1 + term2 + term3 + term4 
-        grad_beta = (
-            -digamma_lmbda * grad_beta_igamma(lmbda, beta) 
-            + torch.exp(torch.log(grad2_lmbda_beta_lower_incomplete_gamma(lmbda, beta)) - loggamma_lmbda)
-        )
+        grad_lmbda = grad2_lmbda_igamma(lmbda, beta)
+        grad_beta = grad_beta_lmbda_igamma(lmbda, beta)
         return grad_output * grad_lmbda, grad_output * grad_beta
 
+def grad_beta_lmbda_igamma(lmbda, beta):
+    return grad_beta_igamma(lmbda, beta) * (torch.log(beta) - torch.digamma(lmbda))
 
 def grad_beta_igamma(lmbda, beta):
-    return torch.exp(-beta + (lmbda + 1) * torch.log(beta) - torch.lgamma(lmbda))
+    return torch.exp(
+        -beta + (lmbda - 1) * torch.log(beta) - torch.lgamma(lmbda)
+    )
 
-def grad_lmbda_igamma(lmbda, beta): 
-    result = -torch.digamma(lmbda) + grad_lmbda_lower_incomplete_gamma(lmbda, beta)
-    result *= torch.exp(-torch.lgamma(lmbda))
-    return result
+D1_ORD6_STENCIL = torch.tensor([-1.0/60, 3.0/20, -3.0/4, 0.0, 3.0/4, -3.0/20, 1.0/60])
+D2_ORD6_STENCIL = torch.tensor([1.0/90, -3.0/20, 3.0/2, -49.0/18, 3.0/2, -3.0/20, 1.0/90])
+EPSILON = 1e-3
+DELTAS = torch.arange(-3, 4, step=1, dtype=torch.float) * EPSILON
+def grad_lmbda_igamma(lmbda, beta):
+    xs = DELTAS.repeat((lmbda.shape[0], 1)).T + lmbda
+    return torch.sum(torch.igamma(xs, beta).T * (D1_ORD6_STENCIL / EPSILON), axis=1)
+
+# def grad_lmbda_igamma(lmbda, beta): 
+#     result = -torch.digamma(lmbda) + grad_lmbda_lower_incomplete_gamma(lmbda, beta)
+#     result *= torch.exp(-torch.lgamma(lmbda))
+#     return result
+
+def grad2_lmbda_igamma(lmbda, beta):
+    xs = DELTAS.repeat((lmbda.shape[0], 1)).T + lmbda
+    return torch.sum(torch.igamma(xs, beta).T * (D2_ORD6_STENCIL / EPSILON**2), axis=1)
+
+# def grad2_lmbda_igamma(lmbda, beta):
+#     digamma_lmbda = torch.digamma(lmbda)
+#     loggamma_lmbda = torch.lgamma(lmbda)
+
+#     term1 = -torch.polygamma(1, lmbda) * torch.igamma(lmbda, beta)
+#     term2 = -digamma_lmbda * grad_lmbda_igamma(lmbda, beta)
+#     term3 = torch.exp(torch.log(grad2_lmbda_lower_incomplete_gamma(lmbda, beta)) - loggamma_lmbda)
+#     term4 = -torch.exp(torch.log(digamma_lmbda) - loggamma_lmbda + torch.log(grad_lmbda_lower_incomplete_gamma(lmbda, beta)))
+#     return term1 + term2 + term3 + term4 
+
 
 def grad_lmbda_lower_incomplete_gamma(lmbda, beta):
     mask = beta < lmbda + 20
@@ -128,21 +145,15 @@ def logZ_approx(k, h, n):
     m = np.sum(lambdas == rlct)
     const_term = (
         scipy.special.loggamma(rlct) 
-        - m * np.log(2)
+        - np.sum(np.log(2 * k))
+        - scipy.special.loggamma(m)
     )
-
-    if m == 2: 
-        const_term -= np.sum(np.log(k))
-    elif m == 1:
-        i = np.argmin(lambdas)
-        j = np.argmax(lambdas)
-        const_term -= np.log(k[i])
-        const_term -= np.log(lambdas[j] - lambdas[i])
-
+    index = np.argsort(lambdas)[m:]
+    const_term -= np.sum(np.log(2 * k[index]) + np.log(lambdas[index] - rlct))
     leading_terms = -rlct * np.log(n) + (m -1) * np.log(np.log(n)) + const_term
     return leading_terms
 
-igamma = RegularisedLowerIncompleteGamma.apply
+igamma = RegularisedLowerIncompleteGamma.apply # torch.igamma
 gradigamma = GradLambdaRegularisedLowerIncompleteGamma.apply # lambda x, y: torch.digamma(x) #
 def elbo_func_mf_gamma_trunc(lambdas, ks, betas, lambda_0, k_0, n, ignore_term=True):
     r = k_0 / ks

@@ -151,11 +151,10 @@ class VariationalInference(object):
             anim = animation.FuncAnimation(
                 fig, animation_frame, frames=len(self.snapshots), interval=interval
             )
-            video = anim.to_html5_video()
         else:
-            video = None
+            anim = None
 
-        return fig, video
+        return fig, anim
 
     def plot_training_curve(self):
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
