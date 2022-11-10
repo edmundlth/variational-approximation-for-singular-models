@@ -155,7 +155,7 @@ def logZ_approx(k, h, n):
 
 igamma = RegularisedLowerIncompleteGamma.apply # torch.igamma
 gradigamma = GradLambdaRegularisedLowerIncompleteGamma.apply # lambda x, y: torch.digamma(x) #
-def elbo_func_mf_gamma_trunc(lambdas, ks, betas, lambda_0, k_0, n, ignore_term=True):
+def elbo_func_mf_gamma_trunc(lambdas, ks, betas, lambda_0, k_0, n, ignore_term=False):
     r = k_0 / ks
     iglambdas_betas = igamma(lambdas, betas)
     logbetas = torch.log(betas)
