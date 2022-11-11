@@ -37,6 +37,7 @@ class VariationalInference(object):
         ]
         self.optim_rec = []
         
+        self.tail_elbos = []
         return
 
     def run_parameter_optimisation(
@@ -53,6 +54,10 @@ class VariationalInference(object):
                 self.best_epoch = self.epoch
                 self.max_elbo = self.elbo
                 self.best_params = [param.clone().detach() for param in self.parameters]
+            
+            self.tail_elbos.append(self.elbo.item())
+            if len(self.tail_elbos) > 50:
+                self.tail_elbos.pop(0)
 
             if t % (num_epoch // num_snapshots) == 0:
                 snapshot = [
@@ -70,6 +75,9 @@ class VariationalInference(object):
 
             self.epoch += 1
         return
+
+    def has_converged(self, threshold=0.1):
+        return np.abs(np.diff(self.tail_elbos)).mean() < threshold
 
     def elbo_fn(self):
         pass
@@ -467,3 +475,126 @@ class MeanFieldTruncatedGammaOn2DStandardForm(MeanFieldGammaOn2DStandardForm):
         z = torch.prod(z / normalising_const, axis=-1)
         return z
 
+
+
+class DirichletOn2DStandardForm(VariationalInference):
+    def __init__(
+        self,
+        n,
+        k_0,
+        lambda_0,
+        lr=0.001,
+        init_params=None, 
+        base_samples=1000
+    ):
+        self.base_samples = base_samples
+        self.n = n
+        self.k_0 = k_0
+        self.lambda_0 = lambda_0
+        # making sure that the first lambda_0 is the RLCT
+        # this makes it possible to freeze beta1=n is required.
+        assert torch.min(self.lambda_0) == self.lambda_0[0]
+        self.h_0 = 2 * k_0 * lambda_0 - 1
+        self.true_parameters = [self.lambda_0, self.k_0, self.n]
+        
+        if init_params is not None:
+            self.init_concentration = init_params[0]
+        else:
+            self.init_concentration = torch.ones_like(self.lambda_0) * 0.5
+        self.log_concentration = nn.Parameter(torch.log(self.init_concentration))
+        self.parameters = [self.log_concentration]
+        
+        self.optim = torch.optim.Adam(self.parameters, lr=lr)
+        super().__init__(self.parameters, self.true_parameters, self.optim)
+        
+    def elbo_fn(self):
+        q = tdist.dirichlet.Dirichlet(concentration=torch.exp(self.log_concentration))
+        xi = q.rsample((self.base_samples,))
+        term1 = q.log_prob(xi)
+        term2 = torch.sum(torch.log(torch.abs(xi)) * self.h_0, dim=1)
+        term3 = self.n * torch.prod(xi ** (2 * self.k_0), dim=1)
+        elbo = -torch.mean(term1 - term2 + term3)
+        return elbo
+    
+    def report_optim_step(self):
+        c = torch.exp(self.log_concentration).detach().tolist()
+        print(
+            f"Epoch {self.epoch:6d}: concentrations={c}, elbo={self.elbo:.2f}"
+        )
+
+    def true_unnormalised_density(self, w):
+        return standard_form_unnormlised_density(w, self.k_0, self.h_0, self.n)
+
+    def variational_density(self, w, parameters):
+        log_concentration = parameters[0]
+        q = tdist.dirichlet.Dirichlet(
+            concentration=torch.exp(log_concentration)
+        )
+        z = np.exp(q.log_prob(w))
+        return z
+
+class MeanFieldBetaOn2DStandardForm(VariationalInference):
+    def __init__(
+        self,
+        n,
+        k_0,
+        lambda_0,
+        lr=0.001,
+        init_params=None, 
+        base_samples=1000
+    ):
+        self.base_samples = base_samples
+        self.n = n
+        self.k_0 = k_0
+        self.lambda_0 = lambda_0
+        # making sure that the first lambda_0 is the RLCT
+        # this makes it possible to freeze beta1=n is required.
+        assert torch.min(self.lambda_0) == self.lambda_0[0]
+        self.h_0 = 2 * k_0 * lambda_0 - 1
+        self.true_parameters = [self.lambda_0, self.k_0, self.n]
+        
+        if init_params is not None:
+            self.init_concentration1, self.init_concentration0 = init_params
+        else:
+            self.init_concentration1 = torch.ones_like(self.lambda_0) * 0.5
+            self.init_concentration0 = torch.ones_like(self.lambda_0) * 0.5
+            
+        self.log_concentration1 = nn.Parameter(torch.log(self.init_concentration1))
+        self.log_concentration0 = nn.Parameter(torch.log(self.init_concentration0))
+        
+        self.parameters = [self.log_concentration1, self.log_concentration0]
+        
+        self.optim = torch.optim.Adam(self.parameters, lr=lr)
+        super().__init__(self.parameters, self.true_parameters, self.optim)
+        
+    def elbo_fn(self):
+        q = tdist.beta.Beta(
+            concentration1=torch.exp(self.log_concentration1), 
+            concentration0=torch.exp(self.log_concentration0)
+        )
+        xi = q.rsample((self.base_samples,))
+        term1 = torch.sum(q.log_prob(xi), dim=1)
+        term2 = torch.sum(torch.log(torch.abs(xi)) * self.h_0, dim=1)
+        term3 = self.n * torch.prod(xi ** (2 * self.k_0), dim=1)
+        elbo = -torch.mean(term1 - term2 + term3)
+        return elbo
+    
+    def report_optim_step(self):
+        c1, c0 = [
+            str(np.around(torch.exp(param).detach().numpy(), 3)) for param in self.parameters
+        ]
+        print(
+            f"Epoch {self.epoch:6d} -- elbo={self.elbo:.2f}, c1={c1:15s}, c2={c0:15s}"
+        )
+
+    def true_unnormalised_density(self, w):
+        return standard_form_unnormlised_density(w, self.k_0, self.h_0, self.n)
+
+    def variational_density(self, w, parameters):
+        log_concentration1, log_concentration0 = parameters
+        q = tdist.beta.Beta(
+            concentration1=torch.exp(log_concentration1), 
+            concentration0=torch.exp(log_concentration0)
+        )
+        z = np.exp(torch.sum(q.log_prob(w), dim=-1))
+        return z
