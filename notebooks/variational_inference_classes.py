@@ -466,3 +466,4 @@ class MeanFieldTruncatedGammaOn2DStandardForm(MeanFieldGammaOn2DStandardForm):
         )
         z = torch.prod(z / normalising_const, axis=-1)
         return z
+
